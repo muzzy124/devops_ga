@@ -1,0 +1,6 @@
+# ignore vkcs_provider.tf
+vkcs_provider.tf
+
+# ignore terraform files
+.terraform.lock.hcl
+.terraform/providers/*
