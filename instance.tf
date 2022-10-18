@@ -7,10 +7,11 @@ data "vkcs_images_image" "compute" {
 }
 
 resource "vkcs_compute_instance" "compute" {
-  name                    = "compute-instance"
+  name                    = "user04-terraform"
   flavor_id               = data.vkcs_compute_flavor.compute.id
-  security_groups         = ["default"]
+  security_groups         = ["default", "all"]
   availability_zone       = "GZ1"
+  key_pair = vkcs_compute_keypair.test-keypair.name
 
   block_device {
     uuid                  = data.vkcs_images_image.compute.id
@@ -39,6 +40,11 @@ resource "vkcs_compute_instance" "compute" {
     vkcs_networking_network.compute,
     vkcs_networking_subnet.compute
   ]
+}
+
+resource "vkcs_compute_keypair" "test-keypair" {
+  name       = "user04-terraform"
+  public_key = file("./keys/id_rsa.pub")
 }
 
 resource "vkcs_networking_floatingip" "fip" {
