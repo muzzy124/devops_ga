@@ -1,0 +1,238 @@
+---
+- name: my first play   # имя
+  hosts: all            # выполняю на всех хостах
+  gather_facts: yes     # собрать инфу по хосту
+  become: yes           # для прокатки этого плея стать root
+  
+  vars:
+    redis_bind: 127.0.0.1
+    redis_password: redis_password
+
+    app_directory: /opt/pytime
+    app_socket: 127.0.0.1:9090
+    app_user: pytime
+
+  tasks:
+#    - name: debug
+#      debug:
+#        msg: hello world!
+    # database
+    - name: install redis server
+      apt:
+        name: redis-server
+        # state: present пакет есть любой версии
+        # latest пакет последний - нежелательно
+        update-cache: yes # sudo apt update
+
+    - name: put redis config
+      copy:
+        dest: /etc/redis/redis.conf
+        content: |
+          requirepass {{ redis_password }}
+          bind {{ redis_bind }}
+          protected-mode yes
+          port 6379
+          tcp-backlog 511
+          timeout 0
+          tcp-keepalive 300
+          daemonize yes
+          supervised no
+          pidfile /var/run/redis/redis-server.pid
+          loglevel notice
+          logfile /var/log/redis/redis-server.log
+          databases 16
+          always-show-logo yes
+          save 900 1
+          save 300 10
+          save 60 10000
+          stop-writes-on-bgsave-error yes
+          rdbcompression yes
+          rdbchecksum yes
+          dbfilename dump.rdb
+          dir /var/lib/redis
+          slave-serve-stale-data yes
+          slave-read-only yes
+          repl-diskless-sync no
+          repl-diskless-sync-delay 5
+          repl-disable-tcp-nodelay no
+          slave-priority 100
+          lazyfree-lazy-eviction no
+          lazyfree-lazy-expire no
+          lazyfree-lazy-server-del no
+          slave-lazy-flush no
+          appendonly no
+          appendfilename "appendonly.aof"
+          appendfsync everysec
+          no-appendfsync-on-rewrite no
+          auto-aof-rewrite-percentage 100
+          auto-aof-rewrite-min-size 64mb
+          aof-load-truncated yes
+          aof-use-rdb-preamble no
+          lua-time-limit 5000
+          slowlog-log-slower-than 10000
+          slowlog-max-len 128
+          latency-monitor-threshold 0
+          notify-keyspace-events ""
+          hash-max-ziplist-entries 512
+          hash-max-ziplist-value 64
+          list-max-ziplist-size -2
+          list-compress-depth 0
+          set-max-intset-entries 512
+          zset-max-ziplist-entries 128
+          zset-max-ziplist-value 64
+          hll-sparse-max-bytes 3000
+          activerehashing yes
+          client-output-buffer-limit normal 0 0 0
+          client-output-buffer-limit slave 256mb 64mb 60
+          client-output-buffer-limit pubsub 32mb 8mb 60
+          hz 10
+          aof-rewrite-incremental-fsync yes
+      notify: restart redis # если файл изменен будет вызов хэндлера нотифай
+
+    - name: call notify right now # дернуть хэндлер прямо сейчас
+      meta: flush_handlers
+
+    - name: store value in redis
+      command: "redis-cli -a {{ redis_password }} set kek lol"
+    # application
+    - name: install pip3
+      apt:
+        name: python3-pip
+
+    - name: install pip3 packages
+      pip:
+        name: "{{ item }}"
+      loop:
+        - flask
+        - redis
+
+    - name: install uwsgi
+      apt:
+        name: "{{ item }}"
+      loop:
+        - uwsgi
+        - uwsgi-plugin-python3
+    
+    # create app directory
+    - name:
+      file:
+        state: directory
+        path: "{{ app_directory }}"
+
+    # create app.py        
+    - name: create app.py
+      copy:
+        dest: "{{ app_directory }}/app.py"
+        content: |
+          import os
+          import json
+          import datetime
+          import socket
+          import redis
+
+          from flask import Flask
+          app = Flask(__name__)
+
+          @app.route("/")
+          def root():
+            now = str(datetime.datetime.now())
+            hostname = socket.gethostname()
+            return("Datetime now is {0} from {1}".format(now, hostname))
+
+          @app.route("/redis/")
+          def redis_function():
+            redis_server = os.getenv("REDIS_SERVER", "localhost")
+            redis_password = "redis_password"
+
+            r = redis.Redis(host=redis_server, password=redis_password, port=6379, db=0)
+            kek_value = r.get("kek").decode("utf-8")
+
+            return("Redis connecting to {0}, value of kek is {1}".format(redis_server, kek_value))
+
+          if __name__ == "__main__":
+            app.run()
+    
+    # create app.ini
+    - name: create app.ini
+      copy:
+        dest: "{{ app_directory }}/app.ini"   
+        content: |
+          [uwsgi]
+          plugin = python3
+          socket = {{ app_socket }}
+          mount = /=app.py
+          callable = app
+
+    # create app.env
+    - name: create app.env
+      copy:
+        dest: "{{ app_directory }}/app.env"   
+        content: |
+          REDIS_SERVER = {{ redis_bind }}
+    
+    # create user for app
+    - name: create user
+      user:
+        name: "{{ app_user }}"
+        shell: /bin/false
+        system: yes
+        create_home: no
+        home: /nonexistent
+
+    - name: create systemd unit
+      copy:
+        dest: /etc/systemd/system/pytime.service
+        content: |
+          [Unit]
+          Description=uWSGI for pytime
+          After=network.target
+
+          [Service]
+          User={{ app_user }}
+          Group={{ app_user }}
+          WorkingDirectory={{ app_directory }}
+          EnvironmentFile=-{{ app_directory }}/app.env
+          ExecStart=/usr/bin/uwsgi --ini app.ini
+
+          [Install]
+          WantedBy=multi-user.target 
+
+    - name: enable systemd unit and start it
+      systemd:
+        name: pytime
+        daemon_reload: yes
+        state: started
+        enabled: yes
+
+    # front
+    - name: install nginx
+      apt:
+        name: nginx
+
+    - name: replace default nginx config (не совсем правильно)
+      copy:
+        dest: /etc/nginx/sites-enabled/default
+        content: |
+          server {
+            listen 80;
+            server_name _;
+
+            location / {
+              include uwsgi_params;
+              uwsgi_pass uwsgi://{{ app_socket }};
+            }
+          }
+      notify: restart nginx
+
+
+  handlers: # запускаются в конце
+    - name: restart redis
+      systemd:
+        name: redis-server
+        state: restarted
+
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+...
